@@ -212,12 +212,19 @@
         <button class="btn btn-secondary btn-small" onclick="exportData()">ส่งออกข้อมูล (.json)</button>
         <label class="file-label btn-small" style="margin:0;" for="importInput">นำเข้าข้อมูล</label>
         <input type="file" id="importInput" accept="application/json" onchange="importData(event)">
+        <button class="btn btn-secondary btn-small" onclick="backfillCreatedAt()">เติมวันที่ย้อนหลัง (เครื่องเก่า)</button>
       </div>
     </div>
-    <div class="field mono" style="margin-bottom:14px;display:flex;gap:8px;">
-      <input id="searchBox" type="text" placeholder="ค้นหาชื่อลูกค้า, ชื่อเครื่อง, S/N, เลขสัญญา..." oninput="renderList()" style="flex:1;">
+    <div class="field mono" style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;">
+      <input id="searchBox" type="text" placeholder="ค้นหาชื่อลูกค้า, ชื่อเครื่อง, S/N, เลขสัญญา..." oninput="renderList()" style="flex:1;min-width:180px;">
       <select id="monthFilter" onchange="renderList()" style="max-width:180px;">
         <option value="">ทุกเดือน</option>
+      </select>
+      <select id="sortOrder" onchange="renderList()" style="max-width:220px;">
+        <option value="addedDesc">เพิ่มล่าสุดก่อน</option>
+        <option value="warrantyStartDesc">วันเริ่มประกัน (ใหม่→เก่า)</option>
+        <option value="warrantyStartAsc">วันเริ่มประกัน (เก่า→ใหม่)</option>
+        <option value="warrantyEndAsc">วันหมดประกัน (ใกล้หมดก่อน)</option>
       </select>
     </div>
     <div id="deviceList"></div>
@@ -478,8 +485,25 @@ function getFilteredDevices(){
   if(monthSel){
     result = result.filter(d => monthKey(d.createdAt) === monthSel);
   }
-  // newest added first
-  return [...result].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  const sortMode = document.getElementById('sortOrder')?.value || 'addedDesc';
+  const sorted = [...result];
+  if(sortMode === 'warrantyStartDesc'){
+    sorted.sort((a, b) => new Date(b.start || 0) - new Date(a.start || 0));
+  } else if(sortMode === 'warrantyStartAsc'){
+    sorted.sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
+  } else if(sortMode === 'warrantyEndAsc'){
+    // devices with no end date go last (they never "expire")
+    sorted.sort((a, b) => {
+      if(!a.end && !b.end) return 0;
+      if(!a.end) return 1;
+      if(!b.end) return -1;
+      return new Date(a.end) - new Date(b.end);
+    });
+  } else {
+    // addedDesc (default): newest added first
+    sorted.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  }
+  return sorted;
 }
 
 function renderList(){
@@ -654,6 +678,30 @@ function importData(e){
   e.target.value = '';
 }
 
+// One-time helper: older devices (imported before "createdAt" existed) don't have a
+// "date added" timestamp. This fills it in using each device's warranty start date
+// as the best available stand-in, so they sort and filter-by-month correctly.
+async function backfillCreatedAt(){
+  const missing = devices.filter(d => !d.createdAt);
+  if(missing.length === 0){
+    alert('ทุกเครื่องมีวันที่ "เพิ่มเมื่อ" อยู่แล้ว ไม่ต้องเติมเพิ่ม');
+    return;
+  }
+  if(!confirm(`พบ ${missing.length} เครื่องที่ยังไม่มีวันที่ "เพิ่มเมื่อ"\n\nระบบจะใช้ "วันเริ่มรับประกัน" ของแต่ละเครื่องแทน (ถ้าไม่มีวันเริ่มประกันจะใช้ 01/01/2569)\n\nดำเนินการต่อหรือไม่?`)) return;
+  let count = 0;
+  try{
+    for(const d of missing){
+      const fallback = d.start ? new Date(d.start).toISOString() : new Date('2026-01-01').toISOString();
+      await setDoc(doc(db, 'devices', d.id), { ...d, createdAt: fallback });
+      count++;
+    }
+    alert(`เติมวันที่ย้อนหลังสำเร็จ ${count} เครื่อง`);
+  }catch(err){
+    console.error('backfillCreatedAt failed:', err);
+    alert(`เติมข้อมูลสำเร็จบางส่วน (${count}/${missing.length}) เกิดข้อผิดพลาด: ${err.message}`);
+  }
+}
+
 // Inline onclick/onsubmit/onchange attributes need these on window since this is a module
 window.saveDevice = saveDevice;
 window.handlePhoto = handlePhoto;
@@ -667,6 +715,7 @@ window.deleteDevice = deleteDevice;
 window.renderList = renderList;
 window.addServiceDate = addServiceDate;
 window.removeServiceDate = removeServiceDate;
+window.backfillCreatedAt = backfillCreatedAt;
 renderServiceDatesUI();
 </script>
 </body>
