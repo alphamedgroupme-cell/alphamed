@@ -213,6 +213,7 @@
         <label class="file-label btn-small" style="margin:0;" for="importInput">นำเข้าข้อมูล</label>
         <input type="file" id="importInput" accept="application/json" onchange="importData(event)">
         <button class="btn btn-secondary btn-small" onclick="backfillCreatedAt()">เติมวันที่ย้อนหลัง (เครื่องเก่า)</button>
+        <button class="btn btn-secondary btn-small" onclick="fixMisenteredYears()">ตรวจ/แก้ปีที่กรอกผิด (พ.ศ.→ค.ศ.)</button>
       </div>
     </div>
     <div class="field mono" style="margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;">
@@ -702,6 +703,66 @@ async function backfillCreatedAt(){
   }
 }
 
+// One-time helper: fixes dates where someone typed the Buddhist year (e.g. 2569)
+// directly into a date field instead of converting it to the Gregorian year (2026).
+// Any year above 2400 is unambiguously a mistaken Buddhist year in this context,
+// since no real warranty date would ever fall that far in the future.
+function shiftYearIfMisentered(dateStr){
+  if(!dateStr) return null;
+  const d = new Date(dateStr);
+  if(isNaN(d.getTime())) return null;
+  if(d.getFullYear() > 2400){
+    const fixed = new Date(d);
+    fixed.setFullYear(d.getFullYear() - 543);
+    return fixed.toISOString().slice(0, 10);
+  }
+  return null; // not affected
+}
+
+async function fixMisenteredYears(){
+  const fixes = []; // { device, field, oldVal, newVal }
+  for(const d of devices){
+    const newStart = shiftYearIfMisentered(d.start);
+    if(newStart) fixes.push({ d, field: 'start', newVal: newStart });
+    const newEnd = shiftYearIfMisentered(d.end);
+    if(newEnd) fixes.push({ d, field: 'end', newVal: newEnd });
+    if(Array.isArray(d.serviceDates)){
+      d.serviceDates.forEach((sd, i) => {
+        const newSd = shiftYearIfMisentered(sd);
+        if(newSd) fixes.push({ d, field: 'serviceDate', index: i, newVal: newSd });
+      });
+    }
+  }
+  if(fixes.length === 0){
+    alert('ไม่พบวันที่ที่กรอกผิดปี (พ.ศ. แทน ค.ศ.) ในระบบ');
+    return;
+  }
+  const affectedDeviceIds = [...new Set(fixes.map(f => f.d.id))];
+  if(!confirm(`พบ ${fixes.length} จุดที่กรอกปีผิด ใน ${affectedDeviceIds.length} เครื่อง\n\nระบบจะลบ 543 ปีออกจากวันที่เหล่านี้ให้อัตโนมัติ (แปลงกลับเป็นปี ค.ศ. ที่ถูกต้อง)\n\nดำเนินการต่อหรือไม่?`)) return;
+
+  let count = 0;
+  try{
+    for(const deviceId of affectedDeviceIds){
+      const d = devices.find(x => x.id === deviceId);
+      const updated = { ...d };
+      const deviceFixes = fixes.filter(f => f.d.id === deviceId);
+      let newServiceDates = Array.isArray(d.serviceDates) ? [...d.serviceDates] : [];
+      for(const f of deviceFixes){
+        if(f.field === 'start') updated.start = f.newVal;
+        else if(f.field === 'end') updated.end = f.newVal;
+        else if(f.field === 'serviceDate') newServiceDates[f.index] = f.newVal;
+      }
+      updated.serviceDates = newServiceDates.sort();
+      await setDoc(doc(db, 'devices', deviceId), updated);
+      count++;
+    }
+    alert(`แก้ไขปีสำเร็จ ${count} เครื่อง`);
+  }catch(err){
+    console.error('fixMisenteredYears failed:', err);
+    alert(`แก้ไขสำเร็จบางส่วน (${count}/${affectedDeviceIds.length}) เกิดข้อผิดพลาด: ${err.message}`);
+  }
+}
+
 // Inline onclick/onsubmit/onchange attributes need these on window since this is a module
 window.saveDevice = saveDevice;
 window.handlePhoto = handlePhoto;
@@ -716,6 +777,7 @@ window.renderList = renderList;
 window.addServiceDate = addServiceDate;
 window.removeServiceDate = removeServiceDate;
 window.backfillCreatedAt = backfillCreatedAt;
+window.fixMisenteredYears = fixMisenteredYears;
 renderServiceDatesUI();
 </script>
 </body>
